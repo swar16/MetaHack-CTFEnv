@@ -6,6 +6,7 @@ import asyncio
 import json
 import sys
 
+<<<<<<< HEAD
 # Avoid UnicodeEncodeError on Windows consoles defaulting to cp1252
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -14,6 +15,8 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
+=======
+>>>>>>> b5dab151cd8ae0a5ea0154a50ec2b07abe729289
 async def mcp_ws_call(ws, method, params=None, req_id=1):
     """Send a JSON-RPC request over the MCP WebSocket and get the response."""
     import websockets
@@ -258,6 +261,7 @@ async def test_payment():
         return False
 
 
+<<<<<<< HEAD
 async def test_idor():
     """Test IDOR + mass-assignment privilege escalation (medium)."""
     import websockets
@@ -371,6 +375,15 @@ async def main():
     if await test_idor():
         passed += 1
 
+=======
+async def main():
+    passed = 0
+    total = 2
+
+    if await test_sqli():
+        passed += 1
+    
+>>>>>>> b5dab151cd8ae0a5ea0154a50ec2b07abe729289
     if await test_payment():
         passed += 1
 
