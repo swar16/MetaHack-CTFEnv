@@ -1,1 +1,0 @@
-# Vulnerable app package init
