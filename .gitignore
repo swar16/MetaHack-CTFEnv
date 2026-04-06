@@ -2,3 +2,16 @@
 .venv/
 __pycache__/
 *.pyc
+
+# Node.js
+node_modules/
+server/vulnerable_app/node_modules/
+server/vulnerable_app/frontend/node_modules/
+
+# Uploads directory (created at runtime)
+server/vulnerable_app/uploads/
+
+# Temp databases
+*.db
+*.db-wal
+*.db-shm

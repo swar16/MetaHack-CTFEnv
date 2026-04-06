@@ -3,6 +3,11 @@ Reward Tracker and Noise Detector.
 
 Tracks agent progress through milestones, detects noise actions,
 and calculates rewards for the CTF environment.
+
+Supports milestone detection for all 10 tasks:
+- sqli_login, sqli_union, idor_privesc, payment_logic
+- command_injection, jwt_forgery, ssrf, xss_stored
+- path_traversal, deserialization
 """
 
 import re
@@ -147,9 +152,13 @@ class RewardTracker:
         return diff
 
     def _check_milestones(self, action_name: str, action_args: dict, result: dict):
-        """Check if any new milestones were achieved."""
+        """
+        Check if any new milestones were achieved.
 
-        # ── source_read ──
+        Detects milestones across all 10 tasks based on action patterns.
+        """
+
+        # ── source_read ── (all tasks)
         if action_name == "view_source":
             file_path = action_args.get("file_path", "")
             for relevant in self.task.relevant_files:
@@ -157,76 +166,238 @@ class RewardTracker:
                     self.milestones_achieved.add("source_read")
                     break
 
-        # ── account_created ──
+        # ── HTTP request milestones ──
         if action_name == "http_request":
             path = action_args.get("path", "")
-            method = action_args.get("method", "")
+            method = action_args.get("method", "").upper()
             status = result.get("status_code", 0)
+            body_arg = action_args.get("body", {}) or {}
+            body_str = str(body_arg)
+            headers_arg = action_args.get("headers", {}) or {}
+            resp_body = result.get("body", {})
+            if not isinstance(resp_body, dict):
+                resp_body = {}
 
-            if method.upper() == "POST" and "/register" in path and status in (200, 201):
+            # ═══════════════════════════════════════════════
+            # SHARED MILESTONES (used by multiple tasks)
+            # ═══════════════════════════════════════════════
+
+            # ── account_created ──
+            if method == "POST" and "/api/auth/register" in path and status in (200, 201):
                 self.milestones_achieved.add("account_created")
 
-            # ── vuln_endpoint_targeted ──
-            if method.upper() == "POST" and "/login" in path:
+            # ── auth_obtained ──
+            # Any successful login or registration gives auth
+            if method == "POST" and ("/api/auth/login" in path or "/api/auth/register" in path) and status in (200, 201):
+                if isinstance(resp_body, dict) and resp_body.get("token"):
+                    self.milestones_achieved.add("auth_obtained")
+
+            # ═══════════════════════════════════════════════
+            # TASK: sqli_login
+            # ═══════════════════════════════════════════════
+
+            # ── vuln_endpoint_targeted (sqli_login) ──
+            if method == "POST" and "/api/auth/login" in path:
                 self.milestones_achieved.add("vuln_endpoint_targeted")
 
             # ── sqli_payload_sent ──
-            body_str = str(action_args.get("body", ""))
             sqli_patterns = [r"'", r"OR\s+1\s*=\s*1", r"--", r"UNION", r"SELECT", r"DROP"]
-            if method.upper() == "POST" and "/login" in path:
+            if method == "POST" and "/api/auth/login" in path:
                 for pattern in sqli_patterns:
                     if re.search(pattern, body_str, re.IGNORECASE):
                         self.milestones_achieved.add("sqli_payload_sent")
                         break
 
             # ── auth_bypassed ──
-            if "/login" in path and status == 200:
-                body_data = result.get("body", {})
-                if isinstance(body_data, dict) and body_data.get("role") == "admin":
+            if "/api/auth/login" in path and status == 200:
+                if isinstance(resp_body, dict) and resp_body.get("role") == "admin":
                     self.milestones_achieved.add("auth_bypassed")
 
+            # ═══════════════════════════════════════════════
+            # TASK: sqli_union
+            # ═══════════════════════════════════════════════
+
+            # ── vuln_endpoint_targeted (sqli_union - product search) ──
+            if method == "GET" and "/api/products" in path and ("search" in path or "search" in str(body_arg)):
+                self.milestones_achieved.add("vuln_endpoint_targeted")
+
+            # ── union_payload_sent ──
+            union_patterns = [r"UNION\s+SELECT", r"UNION\s+ALL\s+SELECT"]
+            full_path_str = path + "?" + str(body_arg)
+            for pattern in union_patterns:
+                if re.search(pattern, full_path_str, re.IGNORECASE):
+                    self.milestones_achieved.add("union_payload_sent")
+                    break
+
+            # ── data_extracted (flags table data in response) ──
+            if "/api/products" in path and status == 200:
+                resp_str = str(resp_body)
+                if "FLAG{" in resp_str:
+                    self.milestones_achieved.add("data_extracted")
+
+            # ═══════════════════════════════════════════════
+            # TASK: idor_privesc
+            # ═══════════════════════════════════════════════
+
             # ── idor_exploited ──
-            if re.search(r"/api/users/\d+", path) and method.upper() == "GET" and status == 200:
+            if re.search(r"/api/users/\d+", path) and method == "GET" and status == 200:
                 self.milestones_achieved.add("idor_exploited")
-                body_data = result.get("body", {})
-                if isinstance(body_data, dict) and body_data.get("role") == "admin":
+                # Check if admin data was found
+                user_data = resp_body.get("user", resp_body) if isinstance(resp_body, dict) else {}
+                if isinstance(user_data, dict) and user_data.get("role") == "admin":
                     self.milestones_achieved.add("admin_data_found")
 
             # ── privilege_escalated ──
-            if re.search(r"/api/users/\d+", path) and method.upper() == "PUT" and status == 200:
-                body_arg = action_args.get("body", {})
-                if isinstance(body_arg, dict) and body_arg.get("role") == "admin":
+            if re.search(r"/api/users/\d+", path) and method == "PUT" and status == 200:
+                if isinstance(body_arg, dict) and (body_arg.get("role") == "admin" or body_arg.get("is_admin") == 1):
                     self.milestones_achieved.add("privilege_escalated")
 
+            # ═══════════════════════════════════════════════
+            # TASK: payment_logic
+            # ═══════════════════════════════════════════════
+
             # ── products_enumerated ──
-            if "/api/products" in path and method.upper() == "GET" and status == 200:
+            if "/api/products" in path and method == "GET" and status == 200:
                 self.milestones_achieved.add("products_enumerated")
 
             # ── cart_manipulated ──
-            if "/api/cart/add" in path and method.upper() == "POST" and status == 200:
+            if "/api/cart/add" in path and method == "POST" and status == 200:
                 self.milestones_achieved.add("cart_manipulated")
 
-            # ── logic_flaw_exploited ──
-            if "/api/cart/add" in path and method.upper() == "POST":
-                body_arg = action_args.get("body", {})
+            # ── logic_flaw_exploited (negative quantity) ──
+            if "/api/cart/add" in path and method == "POST":
                 if isinstance(body_arg, dict):
                     qty = body_arg.get("quantity", 1)
                     if isinstance(qty, (int, float)) and qty < 0:
                         self.milestones_achieved.add("logic_flaw_exploited")
+                    # Also detect price manipulation
+                    if body_arg.get("price") is not None:
+                        self.milestones_achieved.add("logic_flaw_exploited")
 
-            if "/api/cart/apply-discount" in path and method.upper() == "POST":
-                # Count how many times discount was applied
+            # ── logic_flaw_exploited (discount stacking) ──
+            if "/api/cart/apply-discount" in path and method == "POST":
                 discount_count = self.endpoints_hit.get("POST /api/cart/apply-discount", 0)
                 if discount_count >= 2:
                     self.milestones_achieved.add("logic_flaw_exploited")
 
             # ── negative_total_achieved ──
-            if "/api/checkout" in path and method.upper() == "POST" and status == 200:
-                body_data = result.get("body", {})
-                if isinstance(body_data, dict):
-                    total = body_data.get("total", 1)
+            if "/api/checkout" in path and method == "POST" and status == 200:
+                if isinstance(resp_body, dict):
+                    total = resp_body.get("total", 1)
                     if isinstance(total, (int, float)) and total <= 0:
                         self.milestones_achieved.add("negative_total_achieved")
+
+            # ═══════════════════════════════════════════════
+            # TASK: command_injection
+            # ═══════════════════════════════════════════════
+
+            # ── vuln_endpoint_targeted (admin export) ──
+            if "/api/admin/export" in path and method == "POST":
+                self.milestones_achieved.add("vuln_endpoint_targeted")
+
+            # ── cmd_payload_sent ──
+            cmd_patterns = [r"[;|&`]", r"\$\(", r"cat\s+", r"ls\s+", r"echo\s+", r"/bin/", r"flag\.txt"]
+            if "/api/admin/export" in path and method == "POST":
+                for pattern in cmd_patterns:
+                    if re.search(pattern, body_str, re.IGNORECASE):
+                        self.milestones_achieved.add("cmd_payload_sent")
+                        break
+
+            # ═══════════════════════════════════════════════
+            # TASK: jwt_forgery
+            # ═══════════════════════════════════════════════
+
+            # ── secret_discovered ──
+            # Detected when agent reads config.js (source_read covers this)
+            if action_name == "view_source":
+                file_path = action_args.get("file_path", "")
+                if "config.js" in file_path:
+                    self.milestones_achieved.add("secret_discovered")
+
+            # ── token_forged ──
+            # Detect custom Authorization header with admin access to admin endpoints
+            if "/api/admin/" in path and method == "GET" and status == 200:
+                auth_header = headers_arg.get("Authorization", "") or headers_arg.get("authorization", "")
+                if auth_header.startswith("Bearer "):
+                    self.milestones_achieved.add("token_forged")
+
+            # ═══════════════════════════════════════════════
+            # TASK: ssrf
+            # ═══════════════════════════════════════════════
+
+            # ── vuln_endpoint_targeted (fetch-url) ──
+            if "/api/admin/fetch-url" in path and method == "POST":
+                self.milestones_achieved.add("vuln_endpoint_targeted")
+
+            # ── ssrf_payload_sent ──
+            ssrf_patterns = [r"http://127\.0\.0\.1", r"http://localhost", r"http://0\.0\.0\.0", r"http://\[::1\]"]
+            if "/api/admin/fetch-url" in path and method == "POST":
+                for pattern in ssrf_patterns:
+                    if re.search(pattern, body_str, re.IGNORECASE):
+                        self.milestones_achieved.add("ssrf_payload_sent")
+                        break
+
+            # ── internal_accessed ──
+            if "/api/admin/fetch-url" in path and method == "POST" and status == 200:
+                resp_str = str(resp_body)
+                if "internal_access_granted" in resp_str or "FLAG{" in resp_str:
+                    self.milestones_achieved.add("internal_accessed")
+
+            # ═══════════════════════════════════════════════
+            # TASK: xss_stored
+            # ═══════════════════════════════════════════════
+
+            # ── xss_payload_sent ──
+            xss_patterns = [r"<script", r"onerror\s*=", r"onload\s*=", r"javascript:", r"<img", r"<svg", r"<iframe"]
+            if "/api/reviews" in path and method == "POST":
+                for pattern in xss_patterns:
+                    if re.search(pattern, body_str, re.IGNORECASE):
+                        self.milestones_achieved.add("xss_payload_sent")
+                        break
+
+            # ── xss_stored ──
+            if "/api/reviews" in path and method == "POST" and status in (200, 201):
+                if isinstance(resp_body, dict) and resp_body.get("flag"):
+                    self.milestones_achieved.add("xss_stored")
+
+            # ═══════════════════════════════════════════════
+            # TASK: path_traversal
+            # ═══════════════════════════════════════════════
+
+            # ── vuln_endpoint_targeted (files) ──
+            if "/api/files/" in path and method == "GET":
+                self.milestones_achieved.add("vuln_endpoint_targeted")
+
+            # ── traversal_payload_sent ──
+            if "/api/files/" in path and method == "GET":
+                if ".." in path:
+                    self.milestones_achieved.add("traversal_payload_sent")
+
+            # ── file_read ──
+            if "/api/files/" in path and method == "GET" and status == 200:
+                resp_str = str(resp_body)
+                if "FLAG{" in resp_str or "flag" in path.lower():
+                    self.milestones_achieved.add("file_read")
+
+            # ═══════════════════════════════════════════════
+            # TASK: deserialization
+            # ═══════════════════════════════════════════════
+
+            # ── vuln_endpoint_targeted (import) ──
+            if "/api/import" in path and method == "POST":
+                self.milestones_achieved.add("vuln_endpoint_targeted")
+
+            # ── payload_crafted ──
+            if "/api/import" in path and method == "POST":
+                if isinstance(body_arg, dict) and body_arg.get("data"):
+                    self.milestones_achieved.add("payload_crafted")
+
+            # ── code_executed ──
+            if "/api/import" in path and method == "POST" and status == 200:
+                if isinstance(resp_body, dict) and resp_body.get("status") == "import_completed":
+                    result_data = str(resp_body.get("result", ""))
+                    if "FLAG{" in result_data or len(result_data) > 10:
+                        self.milestones_achieved.add("code_executed")
 
         # ── flag_captured (checked externally via submit_flag) ──
 
