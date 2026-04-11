@@ -31,6 +31,9 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
 MAX_STEPS = 30
+SCORE_EPSILON = 0.001
+INITIAL_TASK_SCORE = 0.01
+SCORE_DECIMALS = 4
 
 # Tasks to run
 TASKS = ["sqli_login", "idor_privesc", "payment_logic"]
@@ -63,6 +66,16 @@ Your goal is to find security vulnerabilities, exploit them, and capture the fla
 """
 
 
+def clamp_task_score(score: float) -> float:
+    """Keep emitted task scores strictly within the validator's accepted range."""
+    return min(1.0 - SCORE_EPSILON, max(SCORE_EPSILON, round(float(score), SCORE_DECIMALS)))
+
+
+def format_task_score(score: float) -> str:
+    """Format a task score without rounding it onto 0.0 or 1.0."""
+    return f"{clamp_task_score(score):.{SCORE_DECIMALS}f}"
+
+
 def log_start(task: str, env: str, model: str):
     """Emit [START] log line."""
     print(f"[START] task={task} env={env} model={model}", flush=True)
@@ -72,16 +85,16 @@ def log_step(step: int, action: str, reward: float, done: bool, error: str | Non
     """Emit [STEP] log line."""
     error_str = "null" if error is None else error
     print(
-        f"[STEP] step={step} action={action} reward={reward:.2f} done={str(done).lower()} error={error_str}",
+        f"[STEP] step={step} action={action} reward={reward:.4f} done={str(done).lower()} error={error_str}",
         flush=True,
     )
 
 
 def log_end(success: bool, steps: int, score: float, rewards: list[float]):
     """Emit [END] log line."""
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    rewards_str = ",".join(f"{r:.4f}" for r in rewards)
     print(
-        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
+        f"[END] success={str(success).lower()} steps={steps} score={format_task_score(score)} rewards={rewards_str}",
         flush=True,
     )
 
@@ -230,9 +243,9 @@ async def run_task(client: OpenAI, env_client, task_name: str) -> tuple[bool, fl
 
     rewards = []
     steps_taken = 0
-    score = 0.0
+    score = INITIAL_TASK_SCORE
     success = False
-    current_score = 0.0
+    current_score = INITIAL_TASK_SCORE
 
     try:
         await env_client.reset(task=task_name)
@@ -302,14 +315,14 @@ async def run_task(client: OpenAI, env_client, task_name: str) -> tuple[bool, fl
 
                         done = tool_done
                         if done:
-                            current_score = reward
+                            current_score = clamp_task_score(reward)
                         else:
-                            current_score = max(0.0, min(1.0, current_score + reward))
+                            current_score = clamp_task_score(current_score + reward)
 
                         if isinstance(result, dict):
                             if result.get("correct") is True:
                                 success = True
-                        score = current_score
+                        score = clamp_task_score(current_score)
 
                         rewards.append(reward)
 
@@ -419,12 +432,12 @@ async def main():
     for r in results:
         status = "OK" if r["success"] else "FAIL"
         print(
-            f"  [{status}] {r['task']}: score={r['score']:.3f} steps={r['steps']}",
+            f"  [{status}] {r['task']}: score={format_task_score(r['score'])} steps={r['steps']}",
             file=sys.stderr,
             flush=True,
         )
     print(
-        f"\n  Average Score: {total_score / total_tasks:.3f}",
+        f"\n  Average Score: {format_task_score(total_score / total_tasks)}",
         file=sys.stderr,
         flush=True,
     )
