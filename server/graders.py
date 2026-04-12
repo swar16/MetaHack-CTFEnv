@@ -1,9 +1,10 @@
 """
-Graders for CTF tasks.
-
-Each grader produces a deterministic 0.0-1.0 score based on the
-agent's episode performance.
+Deterministic graders for CTF tasks.
 """
+
+from __future__ import annotations
+
+from models import GradeSummaryModel
 
 from .reward import RewardTracker
 from .tasks.base_task import BaseTask
@@ -11,51 +12,35 @@ from .tasks.base_task import BaseTask
 
 class TaskGrader:
     """
-    Deterministic grader for a CTF task.
-
-    Takes the RewardTracker state at the end of an episode
-    and produces a final score between 0.0 and 1.0.
+    Deterministic grader for a task episode.
     """
 
     def __init__(self, task: BaseTask):
         self.task = task
 
     def grade(self, tracker: RewardTracker) -> float:
-        """
-        Grade a completed episode.
-
-        Args:
-            tracker: The RewardTracker with episode state.
-
-        Returns:
-            Score between 0.0 and 1.0.
-        """
+        """Return a normalized final score between 0.0 and 1.0."""
         return tracker.calculate_reward()
 
     def grade_summary(self, tracker: RewardTracker) -> dict:
-        """
-        Produce a detailed grading summary.
-
-        Args:
-            tracker: The RewardTracker with episode state.
-
-        Returns:
-            Dictionary with score breakdown.
-        """
+        """Return a structured score breakdown."""
         score = self.grade(tracker)
         milestones_hit = sorted(tracker.milestones_achieved)
-        task_milestone_names = [m.name for m in self.task.milestones]
+        task_milestone_names = [milestone.name for milestone in self.task.milestones]
 
-        return {
-            "task": self.task.name,
-            "difficulty": self.task.difficulty,
-            "final_score": score,
-            "flag_captured": "flag_captured" in tracker.milestones_achieved,
-            "milestones_achieved": milestones_hit,
-            "milestones_missed": [m for m in task_milestone_names if m not in milestones_hit],
-            "total_steps": tracker.total_steps,
-            "optimal_steps": self.task.optimal_steps,
-            "noise_count": tracker.noise_count,
-            "elegance_bonus": tracker._elegance_bonus(),
-            "noise_penalty": tracker._noise_penalty(),
-        }
+        summary = GradeSummaryModel(
+            task=self.task.name,
+            difficulty=self.task.difficulty,
+            final_score=score,
+            flag_captured="flag_captured" in tracker.milestones_achieved,
+            milestones_achieved=milestones_hit,
+            milestones_missed=[name for name in task_milestone_names if name not in milestones_hit],
+            total_steps=tracker.total_steps,
+            optimal_steps=self.task.optimal_steps,
+            noise_count=tracker.noise_count,
+            elegance_bonus=tracker._elegance_bonus(),
+            precision_bonus=tracker._precision_bonus(),
+            noise_penalty=tracker._noise_penalty(),
+            detection_risk=tracker.detection_risk(),
+        )
+        return summary.model_dump()

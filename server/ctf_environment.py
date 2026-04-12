@@ -25,6 +25,15 @@ except ImportError:
     from openenv.core.env_server.types import Action, Observation, State
 
 from fastmcp import FastMCP
+from models import (
+    ErrorResponse,
+    FlagSubmissionResponseModel,
+    HttpRequestResponseModel,
+    SourceFileListResponseModel,
+    SourceViewResponseModel,
+    TaskInfoModel,
+    TaskReadyResponseModel,
+)
 
 from .tasks.base_task import BaseTask
 from .tasks.sqli_task import sqli_task
@@ -152,10 +161,10 @@ class CTFEnvironment(MCPEnvironment):
             """
             task = env_ref._active_task
             relevant = task.relevant_files if task else []
-            return {
-                "files": sorted(VIEWABLE_SOURCE_FILES.keys()),
-                "task_relevant_files": relevant,
-            }
+            return SourceFileListResponseModel(
+                files=sorted(VIEWABLE_SOURCE_FILES.keys()),
+                task_relevant_files=relevant,
+            ).model_dump()
 
         @mcp.tool
         def view_source(file_path: str) -> dict:
@@ -175,19 +184,19 @@ class CTFEnvironment(MCPEnvironment):
             """
             abs_path = VIEWABLE_SOURCE_FILES.get(file_path)
             if abs_path is None:
-                return {
-                    "error": f"File '{file_path}' not found. Use list_source_files() to see available files.",
-                    "available_files": sorted(VIEWABLE_SOURCE_FILES.keys()),
-                }
+                return ErrorResponse(
+                    error=f"File '{file_path}' not found. Use list_source_files() to see available files.",
+                    details={"available_files": sorted(VIEWABLE_SOURCE_FILES.keys())},
+                ).model_dump()
 
             try:
                 with open(abs_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                    result = {
-                        "file_path": file_path,
-                        "content": content,
-                        "lines": len(content.splitlines()),
-                    }
+                    result = SourceViewResponseModel(
+                        file_path=file_path,
+                        content=content,
+                        lines=len(content.splitlines()),
+                    ).model_dump()
                     # Update reward tracker
                     if env_ref._tracker:
                         env_ref._step_reward = env_ref._tracker.update(
@@ -195,7 +204,7 @@ class CTFEnvironment(MCPEnvironment):
                         )
                     return result
             except Exception as e:
-                return {"error": f"Failed to read file: {str(e)}"}
+                return ErrorResponse(error=f"Failed to read file: {str(e)}").model_dump()
 
         @mcp.tool
         def http_request(
@@ -253,12 +262,12 @@ class CTFEnvironment(MCPEnvironment):
                 except (ValueError, Exception):
                     resp_body = response.text[:2000]
 
-                result = {
-                    "status_code": response.status_code,
-                    "headers": dict(response.headers),
-                    "body": resp_body,
-                    "cookies": dict(response.cookies) if response.cookies else {},
-                }
+                result = HttpRequestResponseModel(
+                    status_code=response.status_code,
+                    headers=dict(response.headers),
+                    body=resp_body,
+                    cookies=dict(response.cookies) if response.cookies else {},
+                ).model_dump()
 
                 # Update reward tracker
                 if env_ref._tracker:
@@ -276,15 +285,15 @@ class CTFEnvironment(MCPEnvironment):
                 return result
 
             except http_requests.exceptions.ConnectionError:
-                return {
-                    "error": "Connection refused. The vulnerable app may not be running.",
-                    "status_code": 0,
-                }
+                return ErrorResponse(
+                    error="Connection refused. The vulnerable app may not be running.",
+                    details={"status_code": 0},
+                ).model_dump()
             except Exception as e:
-                return {
-                    "error": f"Request failed: {str(e)}",
-                    "status_code": 0,
-                }
+                return ErrorResponse(
+                    error=f"Request failed: {str(e)}",
+                    details={"status_code": 0},
+                ).model_dump()
 
         @mcp.tool
         def submit_flag(flag: str) -> dict:
@@ -303,7 +312,12 @@ class CTFEnvironment(MCPEnvironment):
             """
             task = env_ref._active_task
             if task is None:
-                return {"error": "No active task. Call reset() first.", "correct": False}
+                return FlagSubmissionResponseModel(
+                    correct=False,
+                    message="No active task. Call reset() first.",
+                    score=0.0,
+                    grade_summary={},
+                ).model_dump()
 
             correct = flag.strip() == task.flag
 
@@ -320,12 +334,12 @@ class CTFEnvironment(MCPEnvironment):
 
             env_ref._done = True
 
-            return {
-                "correct": correct,
-                "message": "Flag captured! Well done!" if correct else "Incorrect flag. Keep trying!",
-                "score": summary.get("final_score", 0.0),
-                "grade_summary": summary,
-            }
+            return FlagSubmissionResponseModel(
+                correct=correct,
+                message="Flag captured! Well done!" if correct else "Incorrect flag. Keep trying!",
+                score=float(summary.get("final_score", 0.0)),
+                grade_summary=summary,
+            ).model_dump()
 
         @mcp.tool
         def get_task_info() -> dict:
@@ -341,11 +355,11 @@ class CTFEnvironment(MCPEnvironment):
             """
             task = env_ref._active_task
             if task is None:
-                return {
-                    "error": "No active task. Call start_task() first.",
-                    "available_tasks": list(TASKS.keys()),
-                }
-            info = task.to_dict()
+                return ErrorResponse(
+                    error="No active task. Call start_task() first.",
+                    details={"available_tasks": list(TASKS.keys())},
+                ).model_dump()
+            info = env_ref._task_info(task).model_dump()
             # Progressive hints based on steps taken
             if env_ref._tracker and env_ref._tracker.total_steps > 10:
                 info["hints"] = task.hints[:2]
@@ -379,10 +393,10 @@ class CTFEnvironment(MCPEnvironment):
                 vulnerable application is running.
             """
             if task_name not in TASKS:
-                return {
-                    "error": f"Unknown task: {task_name}",
-                    "available_tasks": list(TASKS.keys()),
-                }
+                return ErrorResponse(
+                    error=f"Unknown task: {task_name}",
+                    details={"available_tasks": list(TASKS.keys())},
+                ).model_dump()
 
             # Stop any previous app
             env_ref._stop_vulnerable_app()
@@ -402,17 +416,17 @@ class CTFEnvironment(MCPEnvironment):
             # Start the vulnerable app
             env_ref._start_vulnerable_app()
 
-            return {
-                "status": "ready",
-                "message": f"Task '{env_ref._active_task.display_name}' initialized!",
-                "task": env_ref._active_task.to_dict(),
-                "instructions": (
+            return TaskReadyResponseModel(
+                status="ready",
+                message=f"Task '{env_ref._active_task.display_name}' initialized!",
+                task=env_ref._task_info(env_ref._active_task),
+                instructions=(
                     "The vulnerable web application is now running. "
                     "Use list_source_files() and view_source() to read the code. "
                     "Use http_request() to interact with the application. "
                     "Use submit_flag() when you find the flag."
                 ),
-            }
+            ).model_dump()
 
         # Pass MCP server to base class
         super().__init__(mcp)
@@ -454,10 +468,10 @@ class CTFEnvironment(MCPEnvironment):
             return Observation(
                 done=True,
                 reward=0.0,
-                metadata={
-                    "error": f"Unknown task: {task_name}",
-                    "available_tasks": list(TASKS.keys()),
-                },
+                metadata=ErrorResponse(
+                    error=f"Unknown task: {task_name}",
+                    details={"available_tasks": list(TASKS.keys())},
+                ).model_dump(),
             )
 
         # Stop previous vulnerable app if running
@@ -485,7 +499,7 @@ class CTFEnvironment(MCPEnvironment):
             metadata={
                 "status": "ready",
                 "message": f"CTF Environment ready! Task: {self._active_task.display_name}",
-                "task": self._active_task.to_dict(),
+                "task": self._task_info(self._active_task).model_dump(),
                 "available_tools": [
                     "list_source_files",
                     "view_source",
@@ -500,6 +514,18 @@ class CTFEnvironment(MCPEnvironment):
                     "and capture the flag. Use submit_flag() when you find it."
                 ),
             },
+        )
+
+    @staticmethod
+    def _task_info(task: BaseTask) -> TaskInfoModel:
+        """Convert a task definition into the public task metadata model."""
+        return TaskInfoModel(
+            task_name=task.name,
+            display_name=task.display_name,
+            description=task.description,
+            difficulty=task.difficulty,
+            optimal_steps=task.optimal_steps,
+            hints=list(task.hints[:1]),
         )
 
     def _start_vulnerable_app(self):

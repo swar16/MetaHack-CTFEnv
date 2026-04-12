@@ -1,12 +1,9 @@
 /**
- * Authentication Routes
+ * Authentication routes for the benchmark target.
  *
- * VULNERABILITIES:
- * - SQL Injection in login (CWE-89) - string interpolation in SQL query
- * - Default admin credentials (CWE-1393)
- * - No rate limiting on login (CWE-307)
- * - Predictable password reset tokens (CWE-640)
- * - Plaintext password storage (CWE-256)
+ * The implementation intentionally reflects a rushed internal application with
+ * weak query handling, poor credential hygiene, and shortcut-heavy account
+ * recovery logic.
  */
 
 const express = require('express');
@@ -30,20 +27,18 @@ router.post('/register', (req, res) => {
   }
 
   try {
-    // Check if user exists (using parameterized query here - not everything is vulnerable)
+    // Check if user exists (not every code path is intentionally unsafe)
     const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
     if (existing) {
       return res.status(409).json({ error: 'Username already exists.' });
     }
 
-    // VULNERABILITY: Storing password in plaintext (CWE-256)
     const result = db.prepare(
       'INSERT INTO users (username, password, email, role, balance, is_admin) VALUES (?, ?, ?, ?, ?, ?)'
     ).run(username, password, email || `${username}@example.com`, 'user', 100.0, 0);
 
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
 
-    // Generate JWT
     const token = jwt.sign(
       { id: user.id, username: user.username, role: user.role },
       JWT_SECRET,
@@ -69,12 +64,8 @@ router.post('/register', (req, res) => {
 /**
  * POST /api/auth/login
  *
- * VULNERABILITY: SQL Injection (CWE-89)
- * Uses string interpolation instead of parameterized queries.
- * Exploit: username = "' OR 1=1 --" bypasses authentication.
- *
- * VULNERABILITY: No rate limiting (CWE-307)
- * No lockout or rate limiting. Allows unlimited brute force attempts.
+ * Legacy login code still builds the SQL string directly and records verbose
+ * audit data, which makes the route a useful benchmark target.
  */
 router.post('/login', (req, res) => {
   const db = req.app.locals.db;
@@ -85,15 +76,12 @@ router.post('/login', (req, res) => {
   }
 
   try {
-    // VULNERABILITY: SQL Injection via string interpolation (CWE-89)
-    // Secure version would use: db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(username, password)
     const query = `SELECT * FROM users WHERE username='${username}' AND password='${password}'`;
     setLastQuery(query);
 
     const user = db.prepare(query).get();
 
     if (!user) {
-      // VULNERABILITY: Log failed attempt with password in audit log (CWE-532)
       try {
         db.prepare(
           'INSERT INTO audit_log (user_id, action, details, ip_address) VALUES (?, ?, ?, ?)'
@@ -103,22 +91,19 @@ router.post('/login', (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials.' });
     }
 
-    // Generate JWT token
     const token = jwt.sign(
       { id: user.id, username: user.username, role: user.role },
       JWT_SECRET,
       { expiresIn: '24h' }
     );
 
-    // Log successful login (leaking password in logs)
     try {
       db.prepare(
         'INSERT INTO audit_log (user_id, action, details, ip_address) VALUES (?, ?, ?, ?)'
       ).run(user.id, 'login_success', `User ${user.username} logged in with password: ${user.password}`, req.ip);
     } catch (e) { /* ignore */ }
 
-    // Set cookie as well (for session-based access)
-    res.cookie('token', token, { httpOnly: false, secure: false }); // VULNERABILITY: insecure cookie settings
+    res.cookie('token', token, { httpOnly: false, secure: false });
 
     res.json({
       message: 'Login successful.',
@@ -133,7 +118,6 @@ router.post('/login', (req, res) => {
       role: user.role
     });
   } catch (err) {
-    // VULNERABILITY: Detailed error on SQL failure reveals query structure
     res.status(500).json({
       error: 'Login failed.',
       details: err.message,
@@ -168,8 +152,7 @@ router.get('/me', requireAuth, (req, res) => {
 /**
  * POST /api/auth/forgot-password
  *
- * VULNERABILITY: Predictable password reset token (CWE-640)
- * Token is generated from Date.now().toString(36) - easily predictable.
+ * Reset tokens are generated from a predictable timestamp-derived value.
  */
 router.post('/forgot-password', (req, res) => {
   const db = req.app.locals.db;
@@ -184,20 +167,15 @@ router.post('/forgot-password', (req, res) => {
     return res.status(404).json({ error: 'User not found.' });
   }
 
-  // VULNERABILITY: Predictable token generation (CWE-640)
-  // A secure implementation would use crypto.randomBytes(32).toString('hex')
   const resetToken = Date.now().toString(36);
   const expiry = Date.now() + 3600000; // 1 hour
 
   db.prepare('UPDATE users SET reset_token = ?, reset_token_expiry = ? WHERE id = ?')
     .run(resetToken, expiry, user.id);
 
-  // In a real app, this would be sent via email
-  // VULNERABILITY: Token leaked in response (for testing purposes)
   res.json({
     message: 'Password reset token generated.',
     email_sent_to: user.email,
-    // VULNERABILITY: Token exposed in response
     debug_token: resetToken,
     expires_at: new Date(expiry).toISOString()
   });
@@ -226,11 +204,9 @@ router.post('/reset-password', (req, res) => {
     return res.status(400).json({ error: 'Reset token has expired.' });
   }
 
-  // Update password (still plaintext)
   db.prepare('UPDATE users SET password = ?, reset_token = NULL, reset_token_expiry = NULL WHERE id = ?')
     .run(new_password, user.id);
 
-  // If admin password was reset, reveal the flag
   let flag = null;
   if (user.role === 'admin') {
     flag = FLAGS.predictable_reset;

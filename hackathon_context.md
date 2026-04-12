@@ -18,7 +18,7 @@ The official benchmark flow focuses on 3 tasks:
 2. Medium: IDOR plus privilege escalation
 3. Hard: Payment logic flaw
 
-The repo also includes extra local-only validation tasks for broader coverage.
+The repo also includes 7 extra local validation tasks for broader coverage, bringing the full task surface to 10.
 
 ---
 
@@ -43,7 +43,7 @@ The repo also includes extra local-only validation tasks for broader coverage.
 
 ### Requirement 5: Stateless Repetition
 - **Rule:** The environment must reset cleanly between runs.
-- **Check:** Each task reset tears down the old vulnerable app, creates a fresh SQLite database, and starts a new per-episode Node.js process on a new ephemeral port.
+- **Check:** Each task reset tears down the old vulnerable app, creates a fresh SQLite database, clears any persisted session cookies, and starts a new per-episode Node.js process on a new ephemeral port.
 
 ---
 
@@ -59,6 +59,15 @@ The repo also includes extra local-only validation tasks for broader coverage.
 1. **SQLi login:** `POST /api/auth/login` allows classic login-bypass SQL injection.
 2. **IDOR plus privesc:** `GET /api/users/:id` leaks arbitrary profiles and `PUT /api/users/:id` allows mass assignment.
 3. **Payment logic:** `POST /api/cart/add` and `POST /api/checkout` allow negative quantity exploitation.
+
+**Extended validation tasks:**
+- `sqli_union`
+- `command_injection`
+- `jwt_forgery`
+- `ssrf`
+- `xss_stored`
+- `path_traversal`
+- `deserialization`
 
 **Grading model:**  
 `server/reward.py` tracks milestones such as reading relevant source, hitting the vulnerable endpoint, exploiting the bug, and submitting the flag. `server/graders.py` produces the final deterministic score.
@@ -77,5 +86,6 @@ To match the spec correctly:
 - final scores must remain deterministic.
 
 Local validation now covers both exploit success and scoring semantics:
-- `test_integration.py` validates 7 exploit paths plus a reward-progression regression check,
-- the 3 official benchmark tasks still remain the primary submission path.
+- `test_integration.py` validates all 10 exposed tasks,
+- it also checks partial-reward progression, negative-credit cases, deterministic reward traces, reset isolation, and score bounds,
+- the 3 official benchmark tasks still remain the primary submission path for `inference.py`.

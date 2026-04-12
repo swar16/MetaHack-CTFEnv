@@ -1,30 +1,27 @@
 /**
- * Import Routes
+ * Import routes.
  *
- * VULNERABILITY: Insecure Deserialization / Code Execution (CWE-502)
- * - User-supplied data decoded and passed to eval()
- * - Allows arbitrary code execution on the server
+ * The import workflow stores the evaluated result as a retrievable job record,
+ * which makes the unsafe processing path feel closer to a real back-office
+ * import system while keeping the benchmark deterministic.
  */
 
+const crypto = require('crypto');
 const express = require('express');
 const { requireAuth } = require('../middleware/auth');
-const { FLAGS } = require('../config');
 
 const router = express.Router();
 
-/**
- * POST /api/import
- *
- * VULNERABILITY: Insecure Deserialization via eval() (CWE-502)
- * Accepts base64-encoded data and evaluates it as JavaScript.
- * Intended for "data import" but allows arbitrary code execution.
- *
- * Exploit: Encode require('fs').readFileSync('flag.txt','utf8') as base64
- * Send: { "data": "<base64 encoded JS code>" }
- * Result is returned in the response.
- */
+function createJobId() {
+  if (typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return crypto.randomBytes(16).toString('hex');
+}
+
 router.post('/', requireAuth, (req, res) => {
   const { data, format } = req.body;
+  const jobs = req.app.locals.importJobs;
 
   if (!data) {
     return res.status(400).json({
@@ -35,39 +32,63 @@ router.post('/', requireAuth, (req, res) => {
   }
 
   try {
-    // Decode base64 data
     const decoded = Buffer.from(data, 'base64').toString('utf8');
-
     let result;
 
     if (format === 'json') {
-      // Try parsing as JSON first
       try {
         result = JSON.parse(decoded);
-      } catch (e) {
-        // VULNERABILITY: Fall through to eval if JSON parse fails
+      } catch (parseError) {
         result = eval(decoded); // eslint-disable-line no-eval
       }
     } else {
-      // VULNERABILITY: Direct eval of user-supplied code (CWE-502)
-      // Secure version would: parse data safely, use JSON.parse, validate schema
       result = eval(decoded); // eslint-disable-line no-eval
     }
 
-    res.json({
-      status: 'import_completed',
+    const jobId = createJobId();
+    jobs.set(jobId, {
+      id: jobId,
+      ownerId: req.user.id,
+      status: 'completed',
       format: format || 'auto',
       result: typeof result === 'object' ? result : String(result),
-      records_processed: typeof result === 'object' && Array.isArray(result) ? result.length : 1
+      recordsProcessed: typeof result === 'object' && Array.isArray(result) ? result.length : 1
+    });
+
+    return res.json({
+      status: 'import_completed',
+      format: format || 'auto',
+      job_id: jobId,
+      records_processed: jobs.get(jobId).recordsProcessed
     });
   } catch (err) {
-    res.status(500).json({
+    return res.status(500).json({
       error: 'Import failed.',
       details: err.message,
-      // VULNERABILITY: Stack trace leaked
       stack: err.stack
     });
   }
+});
+
+router.get('/jobs/:jobId', requireAuth, (req, res) => {
+  const jobs = req.app.locals.importJobs;
+  const job = jobs.get(req.params.jobId);
+
+  if (!job) {
+    return res.status(404).json({ error: 'Import job not found.' });
+  }
+
+  if (job.ownerId !== req.user.id && req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'You do not have access to this import job.' });
+  }
+
+  return res.json({
+    job_id: job.id,
+    status: job.status,
+    format: job.format,
+    records_processed: job.recordsProcessed,
+    result: job.result
+  });
 });
 
 module.exports = router;

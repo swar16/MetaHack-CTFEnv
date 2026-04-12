@@ -1,11 +1,9 @@
 /**
- * Express Application Factory
+ * Express application factory for the VulnShop benchmark target.
  *
- * VULNERABILITIES in middleware configuration:
- * - CORS wildcard with credentials (CWE-942)
- * - No security headers (CWE-693)
- * - Debug mode enabled
- * - Verbose error handling
+ * The app intentionally retains several security flaws, but the benchmark
+ * surfaces them through realistic route behavior rather than explicit
+ * walkthrough comments in the source.
  */
 
 const express = require('express');
@@ -15,16 +13,14 @@ const path = require('path');
 const { errorHandler } = require('./middleware/errorHandler');
 const { FLAGS } = require('./config');
 
-function createApp(db, port) {
+function createApp(db, port, internalService) {
   const app = express();
 
-  // Store db and port on app for access in routes
   app.locals.db = db;
   app.locals.port = port;
+  app.locals.internalService = internalService;
+  app.locals.importJobs = new Map();
 
-  // ── Middleware ──
-
-  // VULNERABILITY: CORS wildcard with credentials (CWE-942)
   app.use(cors({
     origin: '*',
     credentials: true,
@@ -32,19 +28,11 @@ function createApp(db, port) {
     allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Requested-With']
   }));
 
-  // VULNERABILITY: No security headers (CWE-693)
-  // Intentionally NOT setting: X-Frame-Options, X-Content-Type-Options,
-  // Content-Security-Policy, Strict-Transport-Security, X-XSS-Protection
-
-  // Parse JSON and URL-encoded bodies
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true }));
   app.use(cookieParser());
-
-  // VULNERABILITY: Serve uploads directory without auth
   app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
-  // ── Routes ──
   const authRoutes = require('./routes/auth');
   const userRoutes = require('./routes/users');
   const productRoutes = require('./routes/products');
@@ -73,7 +61,6 @@ function createApp(db, port) {
   app.use('/api/import', importRoutes);
   app.use('/api/debug', debugRoutes);
 
-  // VULNERABILITY: Exposed .env endpoint (CWE-16)
   app.get('/.env', (req, res) => {
     res.type('text/plain').send(
       `# VulnShop Environment Configuration\n` +
@@ -87,7 +74,6 @@ function createApp(db, port) {
     );
   });
 
-  // VULNERABILITY: Exposed config endpoint
   app.get('/api/config', (req, res) => {
     res.json({
       app_name: 'VulnShop',
@@ -99,19 +85,6 @@ function createApp(db, port) {
     });
   });
 
-  // Internal-only endpoint for SSRF exploitation
-  app.get('/api/internal/secret', (req, res) => {
-    // This endpoint is meant to be accessed only via SSRF
-    // In a real scenario, it would check for internal IP
-    // Here it's accessible but "hidden" - not in public docs
-    res.json({
-      status: 'internal_access_granted',
-      secret: FLAGS.ssrf,
-      message: 'This endpoint should only be accessible from internal network.'
-    });
-  });
-
-  // Root endpoint
   app.get('/', (req, res) => {
     res.json({
       name: 'VulnShop E-Commerce API',
@@ -128,17 +101,15 @@ function createApp(db, port) {
         reviews: ['POST /api/reviews', 'GET /api/reviews'],
         search: ['GET /api/search'],
         feedback: ['POST /api/feedback'],
-        import: ['POST /api/import'],
+        import: ['POST /api/import', 'GET /api/import/jobs/:jobId'],
         debug: ['GET /api/debug/info', 'GET /api/debug/headers']
       }
     });
   });
 
-  // Serve React frontend static files (if built)
   const frontendPath = path.join(__dirname, '..', 'frontend', 'dist');
   app.use(express.static(frontendPath));
 
-  // SPA fallback - serve index.html for non-API routes
   app.get(/^(?!\/api\/).*/, (req, res, next) => {
     const indexPath = path.join(frontendPath, 'index.html');
     try {
@@ -148,7 +119,6 @@ function createApp(db, port) {
     }
   });
 
-  // VULNERABILITY: Verbose error handler (CWE-209)
   app.use(errorHandler);
 
   return app;
